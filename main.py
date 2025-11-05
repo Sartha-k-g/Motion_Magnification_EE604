@@ -1,337 +1,133 @@
-# pre-processing starts here
-
-import os
-import sys
-import datetime
-import re
-import argparse
-import numpy
-from PIL import Image
-import cv2
-import torch
+import os, sys, re, datetime, argparse
+import numpy as np
+import cv2, torch
 
 from steerable_pyramid import SteerablePyramid, SuboctaveSP
 from phase_based_processing import PhaseBased
 from phase_utils import *
 
-## ==========================================================================================
-## constants
-EPS = 1e-6  # factor to avoid division by 0
+EPS = 1e-6
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-## ==========================================================================================
-## construct the argument parse and parse the arguments
 ap = argparse.ArgumentParser()
-# Basic Args
-ap.add_argument("-v", "--video_path", type=str, required=True,
-                help="path to input video")
-ap.add_argument("-a", "--phase_mag", type=float, default=25.0, required=True,
-                help="Phase Magnification Factor")
-ap.add_argument("-lo", "--freq_lo", type=float, required=True,
-                help="Low Frequency cutoff for Temporal Filter")
-ap.add_argument("-hi", "--freq_hi", type=float, required=True,
-                help="High Frequency cutoff for Temporal Filter")
-ap.add_argument("-n", "--colorspace", type=str, default="luma1",
-                choices={"luma1", "luma3", "gray", "yiq", "rgb"},
-                help="Defines the Colorspace that the processing will take place in")
 
-# Pyramid Args
+ap.add_argument("-v", "--video_path", type=str, required=True)
+ap.add_argument("-a", "--phase_mag", type=float, default=25.0)
+ap.add_argument("-lo", "--freq_lo", type=float, required=True)
+ap.add_argument("-hi", "--freq_hi", type=float, required=True)
+ap.add_argument("-n", "--colorspace", type=str, default="luma3",
+                choices={"luma1", "luma3", "gray", "yiq", "rgb"})
 ap.add_argument("-p", "--pyramid_type", type=str, default="half_octave",
-                choices={"full_octave",
-                         "half_octave",
-                         "smooth_half_octave",
-                         "smooth_quarter_octave"},
-                help="Complex Steerable Pyramid Type")
-
-# Phase Processing Args
-ap.add_argument("-s", "--sigma", type=float, default=0.0,
-                help="Guassian Kernel Std Dev for amplitude weighted filtering, \n" \
-                     "If 0, then amplitude weighted filtering will not be performed")
-ap.add_argument("-t", "--attenuate", type=bool, default=False,
-                help="Attenuates other frequencies if True")
-ap.add_argument("-fs", "--sample_frequency", type=float, default=-1.0,
-                help="Video sample frequency, defaults to sample frequency from input " \
-                     "video if input is less than or equal to zero. Video is " \
-                     "reconstructed with detected sample frequency")
-
-# Misc Args
-ap.add_argument("-r", "--reference_index", type=int, default=0,
-                help="Reference Index for DC frame \
-         (i.e. reference frame for phase changes)")
-ap.add_argument("-c", "--scale_factor", type=float, default=1.0,
-                help="Scales down image to rpeserve memory")
-ap.add_argument("-b", "--batch_size", type=int, default=2,
-                help="Batch size for CUDA parallelization")
-ap.add_argument("-d", "--save_directory", type=str, default="",
-                help="Save directory for output video or GIF, if False outputs \
-          are placed in the same location as the input video")
-
-## ==========================================================================================
-## start main program
+                choices={"full_octave","half_octave",
+                         "smooth_half_octave","smooth_quarter_octave"})
+ap.add_argument("-s", "--sigma", type=float, default=0.0)
+ap.add_argument("-t", "--attenuate", type=bool, default=False)
+ap.add_argument("-fs","--sample_frequency", type=float, default=-1.0)
+ap.add_argument("-r", "--reference_index", type=int, default=0)
+ap.add_argument("-c", "--scale_factor", type=float, default=1.0)
+ap.add_argument("-b", "--batch_size", type=int, default=2)
+ap.add_argument("-d", "--save_directory", type=str, default="")
 
 if __name__ == '__main__':
 
-    ## Default use commandline args
-    ## --> Comment this out to manually input args in script
-    # args = vars(ap.parse_args())
+    args = vars(ap.parse_args())
 
-    # Optional: Pass arguments directly in script
-    # --> Comment this out to receive args from commandline
-    args = vars(ap.parse_args(
-        ["--video_path", "videos/guitar.avi",  # "videos/eye.avi", # "videos/crane_crop.avi",
-         "--phase_mag", "25.0",  # "25.0",
-         "--freq_lo", "72",  # "30", # "0.20",
-         "--freq_hi", "92",  # "50", # "0.25",
-         "--colorspace", "luma3",
-         "--pyramid_type", "half_octave",
-         "--sigma", "2.0",  # "5.0"
-         "--attenuate", "True",  # "False",
-         "--sample_frequency", "600",  # "500", # "-1.0", # This is generally not needed
-         "--reference_index", "0",
-         "--scale_factor", "0.75",  # "1.0"
-         "--batch_size", "4",
-         "--save_directory", "",
-         ]))
-
-    # args = vars(ap.parse_args(
-    #     ["--video_path",       "videos/crane_crop.avi",
-    #      "--phase_mag",        "25.0",
-    #      "--freq_lo",          "0.20",
-    #      "--freq_hi",          "0.25",
-    #      "--colorspace",       "luma3",
-    #      "--pyramid_type",     "half_octave",
-    #      "--sigma",            "5.0",
-    #      "--attenuate",        "True", # "False",
-    #      "--sample_frequency", "-1.0", # This is generally not needed
-    #      "--reference_index",  "0",
-    #      "--scale_factor",     "1.0",
-    #      "--batch_size",       "4",
-    #      "--save_directory",   "",
-    #      ]))
-
-    ## Parse Args
     video_path = args["video_path"]
-    phase_mag = args["phase_mag"]
-    freq_lo = args["freq_lo"]
-    freq_hi = args["freq_hi"]
-    colorspace = args["colorspace"]
-    pyramid_type = args["pyramid_type"]
-    sigma = args["sigma"]
-    attenuate = args["attenuate"]
-    sample_frequency = args["sample_frequency"]
-    ref_idx = args["reference_index"]
-    scale_factor = args["scale_factor"]
-    batch_size = args["batch_size"]
-    save_directory = args["save_directory"]
-
-    ## ======================================================================================
-    ## start the clock once the args are received
-    tic = cv2.getTickCount()
-
-    ## ======================================================================================
-    ## Process input filepaths
     if not os.path.exists(video_path):
-        print(f"\nInput video path: {video_path} not found! exiting \n")
+        print(f"Video not found: {video_path}")
         sys.exit()
 
-    if not save_directory:
-        save_directory = os.path.dirname(video_path)
-    elif not os.path.exists(save_directory):
-        save_directory = os.path.dirname(video_path)
-        print(f"\nSave Directory not found, " \
-              "using default input video directory instead \n")
+    save_dir = args["save_directory"] or os.path.dirname(video_path)
+    if not os.path.exists(save_dir):
+        print(f"Save directory not found, using input video directory")
+        save_dir = os.path.dirname(video_path)
 
-    video_name = re.search("\w*(?=\.\w*)", video_path).group()
-    video_output = f"{video_name}_{colorspace}_{int(phase_mag)}x.mp4"
-    video_save_path = os.path.join(save_directory, video_output)
+    video_name = re.search(r"\w+(?=\.\w+)", video_path).group()
+    video_save = os.path.join(save_dir, f"{video_name}_{args['colorspace']}_{int(args['phase_mag'])}x.mp4")
 
-    print(f"\nProcessing {video_name} " \
-          f"and saving results to {video_save_path} \n")
-    print(f"Device found: {DEVICE} \n")
-
-    ## ======================================================================================
-    ## Get frames and sample rate (fs) from input video
-
-    # get forward and inverse colorspace functions
-    # inverse colorspace obtains frames back in BGR representation
-    if colorspace == "luma1":
+    # Colorspace setup
+    if args["colorspace"] == "luma1":
         colorspace_func = lambda x: bgr2yiq(x)[:, :, 0]
         inv_colorspace = lambda x: cv2.cvtColor(
             cv2.normalize(x, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8UC1),
             cv2.COLOR_GRAY2BGR)
 
-    elif colorspace == "luma3" or colorspace == "yiq":
+    elif args["colorspace"] in {"luma3","yiq"}:
         colorspace_func = bgr2yiq
         inv_colorspace = lambda x: cv2.cvtColor(
             cv2.normalize(yiq2rgb(x), None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8UC3),
             cv2.COLOR_RGB2BGR)
 
-    elif colorspace == "gray":
+    elif args["colorspace"] == "gray":
         colorspace_func = lambda x: cv2.cvtColor(x, cv2.COLOR_BGR2GRAY)
         inv_colorspace = lambda x: cv2.cvtColor(
             cv2.normalize(x, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8UC1),
             cv2.COLOR_GRAY2BGR)
 
-    elif colorspace == "rgb":
+    else:  # rgb
         colorspace_func = lambda x: cv2.cvtColor(x, cv2.COLOR_BGR2RGB)
         inv_colorspace = lambda x: cv2.cvtColor(
             cv2.normalize(x, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8UC3),
             cv2.COLOR_RGB2BGR)
 
-    # get scaled video frames in proper colorspace and sample frequency fs
-    frames, video_fs = get_video(args["video_path"],
-                                 args["scale_factor"],
-                                 colorspace_func)
-
-    ## ======================================================================================
-    ## Prepare for processing
-
-    # get reference frame info
-    ref_frame = frames[ref_idx]
-    h, w = ref_frame.shape[:2]
-
-    # video length
+    frames, video_fs = get_video(video_path, args["scale_factor"], colorspace_func)
+    ref = frames[args["reference_index"]]
+    h, w = ref.shape[:2]
     num_frames = len(frames)
 
-    # get sample frequency fs, use input sample frequency if valid
-    if sample_frequency > 0.0:
-        fs = sample_frequency
-        print(f"Detected Sample Frequency: {video_fs} \n")
-        print(f"Sample Frequency overridden with input!: fs = {fs} \n")
+    fs = args["sample_frequency"] if args["sample_frequency"] > 0 else video_fs
+    transfer = bandpass_filter(args["freq_lo"], args["freq_hi"], fs, num_frames, DEVICE)
+
+    max_depth = int(np.floor(np.log2(min(h,w))) - 2)
+    pyr_type = args["pyramid_type"]
+
+    if pyr_type == "full_octave":
+        csp = SteerablePyramid(max_depth,4,1,1.0,True)
+    elif pyr_type == "half_octave":
+        csp = SteerablePyramid(max_depth,8,2,0.75,True)
+    elif pyr_type == "smooth_half_octave":
+        csp = SuboctaveSP(max_depth,8,2,6,True)
     else:
-        fs = video_fs
-        print(f"Detected Sample Frequency: fs = {fs} \n")
+        csp = SuboctaveSP(max_depth,8,4,6,True)
 
-    # Get Bandpass Filter Transfer function
-    transfer_function = bandpass_filter(freq_lo,
-                                        freq_hi,
-                                        fs,
-                                        num_frames,
-                                        DEVICE)
+    filters,_ = csp.get_filters(h,w,cropped=False)
+    filters = torch.tensor(np.array(filters),dtype=torch.float32).to(DEVICE)
 
-    # Get Complex Steerable Pyramid Object
-    max_depth = int(np.floor(np.log2(np.min(np.array((w, h))))) - 2)
-    if pyramid_type == "full_octave":
-        csp = SteerablePyramid(depth=max_depth,
-                               orientations=4,
-                               filters_per_octave=1,
-                               twidth=1.0,
-                               complex_pyr=True)
-
-    elif pyramid_type == "half_octave":
-        csp = SteerablePyramid(depth=max_depth,
-                               orientations=8,
-                               filters_per_octave=2,
-                               twidth=0.75,
-                               complex_pyr=True)
-
-    elif pyramid_type == "smooth_half_octave":
-        csp = SuboctaveSP(depth=max_depth,
-                          orientations=8,
-                          filters_per_octave=2,
-                          cos_order=6,
-                          complex_pyr=True)
-
-    elif pyramid_type == "smooth_quarter_octave":
-        csp = SuboctaveSP(depth=max_depth,
-                          orientations=8,
-                          filters_per_octave=4,
-                          cos_order=6,
-                          complex_pyr=True)
-
-    # get Complex Steerable Pyramid Filters
-    filters, crops = csp.get_filters(h, w, cropped=False)
-    filters_tensor = torch.tensor(np.array(filters)).type(torch.float32) \
-        .to(DEVICE)
-
-    num_filters = filters_tensor.shape[0]
-    # Fix for incompatible batch sizes
-    if (num_filters % batch_size) != 0:
-        print(f"WARNING! Selected Batch size: {batch_size} is not " \
-                f"compatible with the number of Filters: {num_filters}.")
-        # Find the largest compatible batch size <= requested batch size
-        for new_batch_size in range(batch_size, 0, -1):
-            if num_filters % new_batch_size == 0:
-                batch_size = new_batch_size
-                print(f"Adjusting batch size to: {batch_size} \n")
+    batch = args["batch_size"]
+    if filters.shape[0] % batch != 0:
+        for b in range(batch,0,-1):
+            if filters.shape[0] % b == 0:
+                batch = b
                 break
-        else:
-            # It will only be hit if the loop completes without 'break'
-            # This is practically impossible since 1 is always a divisor
-            pass
 
-    # Compute DFT for all Video Frames
-    frames_tensor = torch.tensor(np.array(frames)).type(torch.float32) \
-        .to(DEVICE)
+    frames_t = torch.tensor(np.array(frames),dtype=torch.float32).to(DEVICE)
+    pb = PhaseBased(args["sigma"], transfer, args["phase_mag"], args["attenuate"],
+                    args["reference_index"], batch, DEVICE, EPS)
 
-    ## ======================================================================================
-    ## Begin Motion Magnification processing
+    if args["colorspace"] in {"yiq","rgb"}:
+        output = torch.zeros_like(frames_t)
+        for c in range(frames_t.shape[-1]):
+            dft = get_fft2_batch(frames_t[:,:,:,c]).to(DEVICE)
+            output[:,:,:,c] = pb.process_single_channel(frames_t[:,:,:,c],filters,dft)
 
-    print(f"Performing Phase Based Motion Magnification \n")
-
-    pb = PhaseBased(sigma, transfer_function, phase_mag, attenuate,
-                    ref_idx, batch_size, DEVICE, EPS)
-
-    if colorspace == "yiq" or colorspace == "rgb":
-        # process each channel individually
-        result_video = torch.zeros_like(frames_tensor).to(DEVICE)
-        for c in range(frames_tensor.shape[-1]):
-            video_dft = get_fft2_batch(frames_tensor[:, :, :, c]).to(DEVICE)
-            result_video[:, :, :, c] = \
-                pb.process_single_channel(frames_tensor[:, :, :, c],
-                                          filters_tensor,
-                                          video_dft)
-
-    elif colorspace == "luma3":
-        # process single Luma channel and add back to full color image
-        result_video = frames_tensor.clone()
-        video_dft = get_fft2_batch(frames_tensor[:, :, :, 0]).to(DEVICE)
-        result_video[:, :, :, 0] = \
-            pb.process_single_channel(frames_tensor[:, :, :, 0],
-                                      filters_tensor,
-                                      video_dft)
+    elif args["colorspace"] == "luma3":
+        output = frames_t.clone()
+        dft = get_fft2_batch(frames_t[:,:,:,0]).to(DEVICE)
+        output[:,:,:,0] = pb.process_single_channel(frames_t[:,:,:,0],filters,dft)
 
     else:
-        # process single channel
-        video_dft = get_fft2_batch(frames_tensor).to(DEVICE)
-        result_video = pb.process_single_channel(frames_tensor,
-                                                 filters_tensor,
-                                                 video_dft)
+        dft = get_fft2_batch(frames_t).to(DEVICE)
+        output = pb.process_single_channel(frames_t,filters,dft)
 
-    # remove from CUDA and convert to numpy
-    result_video = result_video.cpu().numpy()
+    output = output.cpu().numpy()
+    out = cv2.VideoWriter(video_save, cv2.VideoWriter_fourcc(*'MP4V'),
+                           int(np.round(video_fs)),
+                           (int(w/args["scale_factor"]), int(h/args["scale_factor"])))
 
-    ## ======================================================================================
-    ## Process results
-
-    og_h = int(h / scale_factor)
-    og_w = int(w / scale_factor)
-
-    sh, sw = og_h, og_w
-
-    # save to mp4
-    out = cv2.VideoWriter(video_save_path,
-                          cv2.VideoWriter_fourcc(*'MP4V'),
-                          int(np.round(video_fs)),
-                          (sw, sh))
-
-    for vid_idx in range(num_frames):
-        bgr_processed = inv_colorspace(result_video[vid_idx])
-        bgr_processed_resized = cv2.resize(bgr_processed, (sw, sh))
-        out.write(bgr_processed_resized)
+    for i in range(num_frames):
+        frame = inv_colorspace(output[i])
+        frame = cv2.resize(frame,(int(w/args["scale_factor"]),int(h/args["scale_factor"])))
+        out.write(frame)
 
     out.release()
-    del out
-
-    print(f"Result video saved to: {video_save_path} \n")
-
-    ## ======================================================================================
-    ## end of processing
-
-    # get time elapsed in Hours : Minutes : Seconds
-    toc = cv2.getTickCount()
-    time_elapsed = (toc - tic) / cv2.getTickFrequency()
-    time_elapsed = str(datetime.timedelta(seconds=time_elapsed))
-
-    print("Motion Magnification processing complete! \n")
-    print(f"Time Elapsed (HH:MM:SS): {time_elapsed} \n")
+    print(f"Saved: {video_save}")
