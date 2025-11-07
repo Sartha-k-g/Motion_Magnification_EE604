@@ -72,6 +72,25 @@ class PhaseBased():
 
         return gauss_kernel
     
+    def adaptive_magnification(self, delta, base_mag, min_mag=0.5, max_mag=6.0):
+        """
+        Scales magnification adaptively based on motion strength.
+        delta: phase difference tensor (batch, 1, H, W)
+        base_mag: default magnification factor
+        min_mag, max_mag: bounds for adaptive scaling
+        """
+        # compute mean absolute phase delta (motion strength)
+        motion_strength = torch.mean(torch.abs(delta))
+
+        # normalize roughly to [0, 1] using a heuristic
+        norm_strength = torch.clamp(motion_strength / 0.2, 0, 1)
+
+        # stronger motion => smaller magnification
+        adaptive_mag = base_mag * (1 - 0.7 * norm_strength)
+
+        # clamp to safety range
+        adaptive_mag = torch.clamp(adaptive_mag, min_mag, max_mag)
+        return adaptive_mag
 
     def process_single_channel(self, 
                                frames_tensor, 
@@ -153,7 +172,9 @@ class PhaseBased():
                     delta /= weight
 
                 ## Modify phase variation
-                modifed_phase = delta * self.phase_mag
+                adaptive_mag = self.adaptive_magnification(delta, self.phase_mag)
+                modifed_phase = delta * adaptive_mag
+
 
                 ## Attenuate other frequencies by scaling current magnitude  
                 ## by normalized reference phase. This removed all phase
