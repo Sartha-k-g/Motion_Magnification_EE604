@@ -126,7 +126,8 @@ def create_gif_from_images(save_path, image_path, ext):
     pil_images = [Image.open(im_path ) for im_path in image_paths]
     pil_images[0].save(save_path, format='GIF', append_images=pil_images,
                        save_all=True, duration=45, loop=0)
-    
+
+
 def create_gif_from_numpy(save_path, images):
     ''' creates a GIF from numpy images
         Inputs:

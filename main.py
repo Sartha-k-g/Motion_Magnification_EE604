@@ -120,7 +120,7 @@ if __name__ == '__main__':
         output = pb.process_single_channel(frames_t,filters,dft)
 
     output = output.cpu().numpy()
-    out = cv2.VideoWriter(video_save, cv2.VideoWriter_fourcc(*'MP4V'),
+    out = cv2.VideoWriter(video_save, cv2.VideoWriter_fourcc(*'mp4v'),
                            int(np.round(video_fs)),
                            (int(w/args["scale_factor"]), int(h/args["scale_factor"])))
 
